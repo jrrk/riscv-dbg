@@ -17,7 +17,9 @@
  */
 
 module dm_mem #(
-    parameter int NrHarts     = -1
+    parameter int                 NrHarts          = -1,
+    parameter int                 BusWidth         = -1,
+    parameter logic [NrHarts-1:0] Selectable_Harts = -1
 )(
     input  logic                             clk_i,       // Clock
     input  logic                             rst_ni,      // debug module reset
@@ -48,10 +50,10 @@ module dm_mem #(
     // SRAM interface
     input  logic                             req_i,
     input  logic                             we_i,
-    input  logic [63:0]                      addr_i,
-    input  logic [63:0]                      wdata_i,
-    input  logic [7:0]                       be_i,
-    output logic [63:0]                      rdata_o
+    input  logic [BusWidth-1:0]              addr_i,
+    input  logic [BusWidth-1:0]              wdata_i,
+    input  logic [BusWidth/8-1:0]            be_i,
+    output logic [BusWidth-1:0]              rdata_o
 );
 
     localparam int HartSelLen = (NrHarts == 1) ? 1 : $clog2(NrHarts);
@@ -84,6 +86,8 @@ module dm_mem #(
 
     logic [63:0] rom_rdata;
     logic [63:0] rdata_d, rdata_q;
+    logic        word_enable32_q;
+
     // distinguish whether we need to forward data from the ROM or the FSM
     // latch the address for this
     logic fwd_rom_d, fwd_rom_q;
@@ -171,7 +175,7 @@ module dm_mem #(
 
         halted_d     = halted_q;
         resuming_d   = resuming_q;
-        rdata_o      = fwd_rom_q ? rom_rdata : rdata_q;
+        rdata_o      = (BusWidth == 64) ? (fwd_rom_q ? rom_rdata : rdata_q) : ( word_enable32_q ? (fwd_rom_q ? rom_rdata[63:32] : rdata_q[63:32]) : (fwd_rom_q ? rom_rdata[31:0] : rdata_q[31:0]) );
         rdata_d      = rdata_q;
         // convert the data in bits representation
         data_bits    = data_i;
@@ -298,6 +302,17 @@ module dm_mem #(
                     // this range is reserved
                     if (ac_ar.regno[15:14] != '0) begin
                         abstract_cmd[0][31:0] = riscv::illegal();
+                    // A0 access needs to be handled separately, as we use A0 to load the DM address offset
+                    // need to access DSCRATCH1 in this case
+                    end else if (ac_ar.regno[12] && (!ac_ar.regno[5]) && (ac_ar.regno[4:0] == 10)) begin
+                        // store s0 in dscratch
+                        abstract_cmd[2][31:0]  = riscv::csrw(riscv::CSR_DSCRATCH0, 8);
+                        // load from data register
+                        abstract_cmd[2][63:32] = riscv::load(ac_ar.aarsize, 8, 10, dm::DataAddr);
+                        // and store it in the corresponding CSR
+                        abstract_cmd[3][31:0]  = riscv::csrw(riscv::CSR_DSCRATCH1, 8);
+                        // restore s0 again from dscratch
+                        abstract_cmd[3][63:32] = riscv::csrr(riscv::CSR_DSCRATCH0, 8);
                     // GPR/FPR access
                     end else if (ac_ar.regno[12]) begin
                         // determine whether we want to access the floating point register or not
@@ -324,6 +339,17 @@ module dm_mem #(
                     // this range is reserved
                     if (ac_ar.regno[15:14] != '0) begin
                         abstract_cmd[0][31:0] = riscv::illegal();
+                    // A0 access needs to be handled separately, as we use A0 to load the DM address offset
+                    // need to access DSCRATCH1 in this case
+                    end else if (ac_ar.regno[12] && (!ac_ar.regno[5]) && (ac_ar.regno[4:0] == 10)) begin
+                        // store s0 in dscratch
+                        abstract_cmd[2][31:0]  = riscv::csrw(riscv::CSR_DSCRATCH0, 8);
+                        // read value from CSR into s0
+                        abstract_cmd[2][63:32] = riscv::csrr(riscv::CSR_DSCRATCH1, 8);
+                        // and store s0 into data section
+                        abstract_cmd[3][31:0]  = riscv::store(ac_ar.aarsize, 8, 10, dm::DataAddr);
+                        // restore s0 again from dscratch
+                        abstract_cmd[3][63:32] = riscv::csrr(riscv::CSR_DSCRATCH0, 8);
                     // GPR/FPR access
                     end else if (ac_ar.regno[12]) begin
                         // determine whether we want to access the floating point register or not
@@ -361,31 +387,46 @@ module dm_mem #(
         endcase
     end
 
+    logic [63:0] rom_addr;
+    assign rom_addr = addr_i;
     debug_rom i_debug_rom (
         .clk_i,
         .req_i,
-        .addr_i,
-        .rdata_o (rom_rdata)
+        .addr_i  ( rom_addr  ),
+        .rdata_o ( rom_rdata )
     );
 
     // ROM starts at the HaltAddress of the core e.g.: it immediately jumps to
     // the ROM base address
     assign fwd_rom_d = (addr_i[DbgAddressBits-1:0] >= dm::HaltAddress[DbgAddressBits-1:0]) ? 1'b1 : 1'b0;
 
+
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (~rst_ni) begin
-            fwd_rom_q  <= 1'b0;
-            rdata_q    <= '0;
-            halted_q   <= 1'b0;
-            resuming_q <= 1'b0;
-            state_q    <= Idle;
+            fwd_rom_q       <= 1'b0;
+            rdata_q         <= '0;
+            state_q         <= Idle;
+            word_enable32_q <= 1'b0;
         end else begin
-            fwd_rom_q  <= fwd_rom_d;
-            rdata_q    <= rdata_d;
-            halted_q   <= halted_d;
-            resuming_q <= resuming_d;
-            state_q    <= state_d;
+            fwd_rom_q       <= fwd_rom_d;
+            rdata_q         <= rdata_d;
+            state_q         <= state_d;
+            word_enable32_q <= addr_i[2];
         end
     end
+
+    generate
+      for(genvar k=0;k < NrHarts; k++) begin
+          always_ff @(posedge clk_i or negedge rst_ni) begin
+              if (~rst_ni) begin
+                  halted_q[k]   <= 1'b0;
+                  resuming_q[k] <= 1'b0;
+              end else begin
+                  halted_q[k]   <= Selectable_Harts[k] ? halted_d[k]   : 1'b0;
+                  resuming_q[k] <= Selectable_Harts[k] ? resuming_d[k] : 1'b0;
+              end
+          end
+      end
+    endgenerate
 
 endmodule

@@ -16,7 +16,9 @@
  */
 
 module dm_csrs #(
-    parameter int NrHarts = -1
+    parameter int                 NrHarts          = -1,
+    parameter int                 BusWidth         = -1,
+    parameter logic [NrHarts-1:0] Selectable_Harts = -1
 ) (
     input  logic                              clk_i,              // Clock
     input  logic                              rst_ni,             // Asynchronous reset active low
@@ -54,8 +56,8 @@ module dm_csrs #(
     input  logic [dm::DataCount-1:0][31:0]    data_i,
     input  logic                              data_valid_i,
     // system bus access module (SBA)
-    output logic [63:0]                       sbaddress_o,
-    input  logic [63:0]                       sbaddress_i,
+    output logic [BusWidth-1:0]               sbaddress_o,
+    input  logic [BusWidth-1:0]               sbaddress_i,
     output logic                              sbaddress_write_valid_o,
     // control signals in
     output logic                              sbreadonaddr_o,
@@ -63,11 +65,11 @@ module dm_csrs #(
     output logic [2:0]                        sbaccess_o,
     // data out
     output logic                              sbreadondata_o,
-    output logic [63:0]                       sbdata_o,
+    output logic [BusWidth-1:0]               sbdata_o,
     output logic                              sbdata_read_valid_o,
     output logic                              sbdata_write_valid_o,
     // read data in
-    input  logic [63:0]                       sbdata_i,
+    input  logic [BusWidth-1:0]               sbdata_i,
     input  logic                              sbdata_valid_i,
     // control signals
     input  logic                              sbbusy_i,
@@ -101,7 +103,7 @@ module dm_csrs #(
     assign haltsum0         = halted_reshaped0[hartsel_o[19:5]];
     // haltsum1
     always_comb begin : p_reduction1
-      halted_flat1 = '0;
+      halted_flat1 = '1;
       for (int k=0; k<NrHarts/2**5; k++) begin
         halted_flat1[k] = &halted_reshaped0[k];
       end
@@ -110,7 +112,7 @@ module dm_csrs #(
     end
     // haltsum2
     always_comb begin : p_reduction2
-      halted_flat2 = '0;
+      halted_flat2 = '1;
       for (int k=0; k<NrHarts/2**10; k++) begin
         halted_flat2[k] = &halted_reshaped1[k];
       end
@@ -119,7 +121,7 @@ module dm_csrs #(
     end
     // haltsum3
     always_comb begin : p_reduction3
-      halted_flat3 = '0;
+      halted_flat3 = '1;
       for (int k=0; k<NrHarts/2**15; k++) begin
         halted_flat3[k] = &halted_reshaped2[k];
       end
@@ -252,9 +254,7 @@ module dm_csrs #(
                 dm::HaltSum2: resp_queue_data = haltsum2;
                 dm::HaltSum3: resp_queue_data = haltsum3;
                 dm::SBCS: begin
-                    if (sbbusy_i) begin
-                        sbcs_d.sbbusyerror = 1'b1;
-                    end
+                    resp_queue_data = sbcs_q;
                 end
                 dm::SBAddress0: begin
                     // access while the SBA was busy
@@ -448,13 +448,13 @@ module dm_csrs #(
         // static values for dcsr
         sbcs_d.sbversion            = 3'b1;
         sbcs_d.sbbusy               = sbbusy_i;
-        sbcs_d.sbasize              = 7'd64; // bus is 64 bit wide
+        sbcs_d.sbasize              = BusWidth; // bus is 64 bit wide
         sbcs_d.sbaccess128          = 1'b0;
-        sbcs_d.sbaccess64           = 1'b0;
-        sbcs_d.sbaccess32           = 1'b0;
+        sbcs_d.sbaccess64           = BusWidth == 64;
+        sbcs_d.sbaccess32           = BusWidth == 32;
         sbcs_d.sbaccess16           = 1'b0;
         sbcs_d.sbaccess8            = 1'b0;
-        sbcs_d.sbaccess             = 1'b0;
+        sbcs_d.sbaccess             = BusWidth == 64 ? 2'd3 : 2'd2;
     end
 
     // output multiplexer
@@ -501,7 +501,6 @@ module dm_csrs #(
         // PoR
         if (~rst_ni) begin
             dmcontrol_q    <= '0;
-            havereset_q    <= '1;
             // this is the only write-able bit during reset
             cmderr_q       <= dm::CmdErrNone;
             command_q      <= '0;
@@ -512,7 +511,6 @@ module dm_csrs #(
             sbaddr_q       <= '0;
             sbdata_q       <= '0;
         end else begin
-            havereset_q    <= havereset_d;
             // synchronous re-set of debug module, active-low, except for dmactive
             if (!dmcontrol_q.dmactive) begin
                 dmcontrol_q.haltreq          <= '0;
@@ -551,6 +549,18 @@ module dm_csrs #(
     end
 
 
+    generate
+      for(genvar k=0;k < NrHarts;k++) begin
+          always_ff @(posedge clk_i or negedge rst_ni) begin
+              if (~rst_ni) begin
+                  havereset_q[k]  <= 1'b1;
+              end else begin
+                  havereset_q[k]  <= Selectable_Harts[k] ? havereset_d[k]   : 1'b0;
+              end
+          end
+      end
+    endgenerate
+
 ///////////////////////////////////////////////////////
 // assertions
 ///////////////////////////////////////////////////////
@@ -561,7 +571,7 @@ module dm_csrs #(
     haltsum: assert property (
         @(posedge clk_i) disable iff (~rst_ni) (dmi_req_ready_o && dmi_req_valid_i && dtm_op == dm::DTM_READ) |->
             !({1'b0, dmi_req_i.addr} inside {dm::HaltSum0, dm::HaltSum1, dm::HaltSum2, dm::HaltSum3}))
-                else $warning("Haltsums are not implemented yet and always return 0.");
+                else $warning("Haltsums have not been properly tested yet.");
 `endif
 //pragma translate_on
 
