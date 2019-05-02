@@ -20,18 +20,8 @@
 module dm_top #(
     parameter int                 NrHarts          = -1,
     parameter int                 BusWidth         = -1,
-    parameter logic [NrHarts-1:0] Selectable_Harts = -1
-    /*
-        PULP RISC-V cores have not continguos MHARTID.
-        This leads to set the number of HARTS >= the maximum value of the MHARTID.
-        In this case, the MHARD ID is {FC_Core_CLUSTER_ID,1'b0,FC_Core_CORE_ID} --> 996 (1024 chosen as power of 2)
-        To avoid paying 1024 flip flop for each number of harts's related register, we implemented
-        the masking parameter, aka SELECTABLE_HARTS.
-        In One-Hot-Encoding way, you select 1 when that MHARTID-related HART can actally be selected.
-        e.g. if you have 2 core with MHART 10 and 5, you select NrHarts=16 and SELECTABLE_HARTS = (1<<10) | (1<<5).
-        This mask will be used to generated only the flip flop needed and the constant-propagator engine of the synthesizer
-        will remove the other flip flops and related logic.
-    */
+    parameter logic [NrHarts-1:0] SelectableHarts  = -1 // Bitmask to select physically available harts for systems
+                                                        // that don't use hart numbers in a contiguous fashion.
 
 ) (
     input  logic                  clk_i,       // clock
@@ -41,6 +31,7 @@ module dm_top #(
     output logic                  dmactive_o,  // debug module is active
     output logic [NrHarts-1:0]    debug_req_o, // async debug request
     input  logic [NrHarts-1:0]    unavailable_i, // communicate whether the hart is unavailable (e.g.: power down)
+    dm::hartinfo_t [NrHarts-1:0]  hartinfo_i,
 
     input  logic                  slave_req_i,
     input  logic                  slave_we_i,
@@ -70,7 +61,6 @@ module dm_top #(
 );
 
     // Debug CSRs
-    dm::hartinfo_t [NrHarts-1:0]      hartinfo;
     logic [NrHarts-1:0]               halted;
     // logic [NrHarts-1:0]               running;
     logic [NrHarts-1:0]               resumeack;
@@ -80,7 +70,7 @@ module dm_top #(
     dm::command_t                     cmd;
 
     logic                             cmderror_valid;
-    dm::cmderr_t                      cmderror;
+    dm::cmderr_e                      cmderror;
     logic                             cmdbusy;
     logic [dm::ProgBufSize-1:0][31:0] progbuf;
     logic [dm::DataCount-1:0][31:0]   data_csrs_mem;
@@ -105,16 +95,10 @@ module dm_top #(
     logic [2:0]                       sberror;
 
 
-    // Debug Ctrl for each hart -> I haven't found a better way to
-    // parameterize this
-    for (genvar i = 0; i < NrHarts; i++) begin : dm_hart_ctrl
-        assign hartinfo[i] = ariane_pkg::DebugHartInfo;
-    end
-
     dm_csrs #(
         .NrHarts(NrHarts),
         .BusWidth(BusWidth),
-        .Selectable_Harts(Selectable_Harts)
+        .SelectableHarts(SelectableHarts)
     ) i_dm_csrs (
         .clk_i                   ( clk_i                 ),
         .rst_ni                  ( rst_ni                ),
@@ -129,7 +113,7 @@ module dm_top #(
         .ndmreset_o              ( ndmreset_o            ),
         .dmactive_o              ( dmactive_o            ),
         .hartsel_o               ( hartsel               ),
-        .hartinfo_i              ( hartinfo              ),
+        .hartinfo_i              ( hartinfo_i            ),
         .halted_i                ( halted                ),
         .unavailable_i,
         .resumeack_i             ( resumeack             ),
@@ -197,7 +181,7 @@ module dm_top #(
     dm_mem #(
         .NrHarts(NrHarts),
         .BusWidth(BusWidth),
-        .Selectable_Harts(Selectable_Harts)
+        .SelectableHarts(SelectableHarts)
     ) i_dm_mem (
         .clk_i                   ( clk_i                 ),
         .rst_ni                  ( rst_ni                ),
@@ -223,5 +207,13 @@ module dm_top #(
         .be_i                    ( slave_be_i            ),
         .rdata_o                 ( slave_rdata_o         )
     );
+
+
+`ifndef VERILATOR
+    initial begin
+        assert (BusWidth == 32 || BusWidth == 64)
+            else $fatal(1, "DM needs a bus width of either 32 or 64 bits");
+    end
+`endif
 
 endmodule

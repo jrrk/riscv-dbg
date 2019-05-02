@@ -52,7 +52,8 @@ module dm_sba #(
     output logic [2:0]             sberror_o // bus error occurred
 );
 
-    enum logic [2:0] { Idle, Read, Write, WaitRead, WaitWrite } state_d, state_q;
+    typedef enum logic [2:0] { Idle, Read, Write, WaitRead, WaitWrite } state_e;
+    state_e state_d, state_q;
 
     logic [BusWidth-1:0]   address;
     logic                  req;
@@ -139,7 +140,7 @@ module dm_sba #(
     end
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (~rst_ni) begin
+        if (!rst_ni) begin
             state_q <= Idle;
         end else begin
             state_q <= state_d;
